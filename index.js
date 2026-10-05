@@ -36,6 +36,7 @@ const SEQUENCES = {
 
 const processedTickets = new Set();
 const activeSequences = new Set();
+const processedMessages = new Set();
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -45,6 +46,12 @@ function extractAdId(text) {
   if (!text) return null;
   const match = text.match(/preview\/\d+\/(\d+)/);
   return match ? match[1] : null;
+}
+
+function extractCep(text) {
+  if (!text) return null;
+  const match = text.match(/\b(\d{5})-?(\d{3})\b/);
+  return match ? `${match[1]}${match[2]}` : null;
 }
 
 function getProduct(adId) {
@@ -118,17 +125,41 @@ async function runSequence(ticketId, product) {
   log(`✅ Concluído → ticket ${ticketId}`);
 }
 
+async function handleCep(ticketId, messageId, cep) {
+  if (processedMessages.has(messageId)) return;
+  processedMessages.add(messageId);
+
+  log(`📍 CEP detectado: ${cep} → ticket ${ticketId}`);
+  const result = await calculateFreight(cep);
+
+  if (!result) {
+    await sendText(ticketId, 'Não consegui calcular o frete para esse CEP. Um atendente irá confirmar o valor para você. 😊');
+    return;
+  }
+
+  await sendText(ticketId,
+    `🚚 Frete estimado: *R$${result.freight},00*\n📍 Distância: ${result.km} km (${result.region})\n\n_Valor estimado — será confirmado pelo atendente antes da entrega._`
+  );
+}
+
 async function poll() {
   const res = await api('get', '/tickets?status=pending&pageNumber=1');
   const tickets = res?.tickets || res?.records || [];
-  if (!tickets.length) return;
 
   for (const ticket of tickets) {
     const ticketId = ticket.id;
-    if (processedTickets.has(ticketId)) continue;
     if (ticket.userId) continue;
 
     const messages = await getTicketMessages(ticketId);
+
+    for (const msg of messages) {
+      if (msg.fromMe) continue;
+      if (processedMessages.has(msg.id)) continue;
+      const cep = extractCep(msg.body);
+      if (cep) await handleCep(ticketId, msg.id, cep);
+    }
+
+    if (processedTickets.has(ticketId)) continue;
     const leadResponded = messages.some(m => !m.fromMe && m.body && !m.body.includes('wa.me/wamo'));
     if (leadResponded) { processedTickets.add(ticketId); continue; }
 
@@ -141,6 +172,19 @@ async function poll() {
     runSequence(ticketId, product).catch(err => log(`Erro: ${err.message}`));
     await sleep(1000);
   }
+
+  const openRes = await api('get', '/tickets?status=open&pageNumber=1');
+  const openTickets = openRes?.tickets || openRes?.records || [];
+
+  for (const ticket of openTickets) {
+    const messages = await getTicketMessages(ticket.id);
+    for (const msg of messages) {
+      if (msg.fromMe) continue;
+      if (processedMessages.has(msg.id)) continue;
+      const cep = extractCep(msg.body);
+      if (cep) await handleCep(ticket.id, msg.id, cep);
+    }
+  }
 }
 
 async function checkReplies() {
@@ -151,24 +195,16 @@ async function checkReplies() {
   }
 }
 
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', processedTickets: processedTickets.size, activeSequences: activeSequences.size, processedMessages: processedMessages.size });
+});
+
 app.post('/frete', async (req, res) => {
   const { cep } = req.body;
   if (!cep) return res.status(400).json({ error: 'CEP obrigatório' });
-
   const result = await calculateFreight(cep);
-  if (!result) {
-    return res.json({
-      message: 'Não consegui calcular o frete para esse CEP. Um atendente irá confirmar o valor para você. 😊'
-    });
-  }
-
-  return res.json({
-    message: `🚚 Frete estimado para seu CEP (${result.region}): *R$${result.freight},00*\n📍 Distância: ${result.km} km\n\n_Valor estimado — será confirmado pelo atendente antes da entrega._`
-  });
-});
-
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', processedTickets: processedTickets.size, activeSequences: activeSequences.size });
+  if (!result) return res.json({ message: 'CEP inválido ou fora da área de entrega.' });
+  return res.json({ km: result.km, region: result.region, freight: result.freight });
 });
 
 app.listen(PORT, () => log(`SK Home Worker rodando na porta ${PORT}`));
