@@ -190,7 +190,13 @@ async function poll() {
 async function checkReplies() {
   for (const ticketId of activeSequences) {
     const messages = await getTicketMessages(ticketId);
-    const hasReply = messages.some(m => !m.fromMe && m.body && !m.body.includes('wa.me/wamo'));
+    const hasReply = messages.some(m => {
+      if (m.fromMe) return false;
+      if (!m.body) return false;
+      if (m.body.includes('wa.me/wamo')) return false;
+      if (extractCep(m.body)) return false; // CEP não cancela
+      return true;
+    });
     if (hasReply) { log(`📨 Lead respondeu → cancelando ticket ${ticketId}`); activeSequences.delete(ticketId); }
   }
 }
