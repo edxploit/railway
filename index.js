@@ -13,10 +13,6 @@ const WHATICKET_TOKEN = process.env.WHATICKET_TOKEN;
 const PORT = process.env.PORT || 3000;
 const POLL_INTERVAL_MS = 30000;
 
-const AD_PRODUCT_MAP = {
-  '120247380663860452': 'beliche',
-};
-
 const SEQUENCES = {
   beliche: {
     images: [
@@ -28,13 +24,24 @@ const SEQUENCES = {
     ],
     message: 'Qual seu CEP? 📍\nPagamento somente na entrega. ✅',
   },
+  treliche: {
+    images: [{ file: 'catalogo.jpg', label: 'Catálogo' }],
+    message: 'Qual seu CEP? 📍\nPagamento somente na entrega. ✅',
+  },
+  'cama-bau': {
+    images: [{ file: 'catalogo.jpg', label: 'Catálogo' }],
+    message: 'Qual seu CEP? 📍\nPagamento somente na entrega. ✅',
+  },
+  colchao: {
+    images: [{ file: 'catalogo.jpg', label: 'Catálogo' }],
+    message: 'Qual seu CEP? 📍\nPagamento somente na entrega. ✅',
+  },
   default: {
     images: [{ file: 'catalogo.jpg', label: 'Catálogo' }],
     message: 'Qual seu CEP? 📍\nPagamento somente na entrega. ✅',
   },
 };
 
-const processedTickets = new Set();
 const activeSequences = new Set();
 const processedMessages = new Set();
 
@@ -42,21 +49,10 @@ function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
-function extractAdId(text) {
-  if (!text) return null;
-  const match = text.match(/preview\/\d+\/(\d+)/);
-  return match ? match[1] : null;
-}
-
 function extractCep(text) {
   if (!text) return null;
   const match = text.match(/\b(\d{5})-?(\d{3})\b/);
   return match ? `${match[1]}${match[2]}` : null;
-}
-
-function getProduct(adId) {
-  if (!adId) return 'default';
-  return AD_PRODUCT_MAP[adId] || 'default';
 }
 
 function sleep(ms) {
@@ -128,61 +124,41 @@ async function runSequence(ticketId, product) {
 async function handleCep(ticketId, messageId, cep) {
   if (processedMessages.has(messageId)) return;
   processedMessages.add(messageId);
-
   log(`📍 CEP detectado: ${cep} → ticket ${ticketId}`);
   const result = await calculateFreight(cep);
-
   if (!result) {
     await sendText(ticketId, 'Não consegui calcular o frete para esse CEP. Um atendente irá confirmar o valor para você. 😊');
     return;
   }
-
   await sendText(ticketId,
     `🚚 Frete estimado: *R$${result.freight},00*\n📍 Distância: ${result.km} km (${result.region})\n\n_Valor estimado — será confirmado pelo atendente antes da entrega._`
   );
 }
 
+app.post('/webhook', async (req, res) => {
+  res.sendStatus(200);
+  const body = req.body;
+  log(`Webhook recebido: ${JSON.stringify(body).substring(0, 300)}`);
+  const product = body?.data?.product || body?.product || 'default';
+  const ticketId = body?.ticket?.id || body?.ticketId || body?.data?.ticket?.id;
+  if (!ticketId) { log('Webhook sem ticketId, ignorando.'); return; }
+  log(`Chatbot trigger: produto=${product}, ticket=${ticketId}`);
+  runSequence(String(ticketId), product).catch(err => log(`Erro sequência: ${err.message}`));
+});
+
 async function poll() {
-  const res = await api('get', '/tickets?status=pending&pageNumber=1');
-  const tickets = res?.tickets || res?.records || [];
-
-  for (const ticket of tickets) {
-    const ticketId = ticket.id;
-    if (ticket.userId) continue;
-
-    const messages = await getTicketMessages(ticketId);
-
-    for (const msg of messages) {
-      if (msg.fromMe) continue;
-      if (processedMessages.has(msg.id)) continue;
-      const cep = extractCep(msg.body);
-      if (cep) await handleCep(ticketId, msg.id, cep);
-    }
-
-    if (processedTickets.has(ticketId)) continue;
-    const leadResponded = messages.some(m => !m.fromMe && m.body && !m.body.includes('wa.me/wamo'));
-    if (leadResponded) { processedTickets.add(ticketId); continue; }
-
-    const firstMsg = messages.find(m => !m.fromMe);
-    const adId = extractAdId(firstMsg?.body);
-    const product = getProduct(adId);
-
-    log(`Ticket ${ticketId} | adId: ${adId || 'nenhum'} | produto: ${product}`);
-    processedTickets.add(ticketId);
-    runSequence(ticketId, product).catch(err => log(`Erro: ${err.message}`));
-    await sleep(1000);
-  }
-
-  const openRes = await api('get', '/tickets?status=open&pageNumber=1');
-  const openTickets = openRes?.tickets || openRes?.records || [];
-
-  for (const ticket of openTickets) {
-    const messages = await getTicketMessages(ticket.id);
-    for (const msg of messages) {
-      if (msg.fromMe) continue;
-      if (processedMessages.has(msg.id)) continue;
-      const cep = extractCep(msg.body);
-      if (cep) await handleCep(ticket.id, msg.id, cep);
+  const statuses = ['pending', 'open'];
+  for (const status of statuses) {
+    const res = await api('get', `/tickets?status=${status}&pageNumber=1`);
+    const tickets = res?.tickets || res?.records || [];
+    for (const ticket of tickets) {
+      const messages = await getTicketMessages(ticket.id);
+      for (const msg of messages) {
+        if (msg.fromMe) continue;
+        if (processedMessages.has(msg.id)) continue;
+        const cep = extractCep(msg.body);
+        if (cep) await handleCep(ticket.id, msg.id, cep);
+      }
     }
   }
 }
@@ -194,7 +170,7 @@ async function checkReplies() {
       if (m.fromMe) return false;
       if (!m.body) return false;
       if (m.body.includes('wa.me/wamo')) return false;
-      if (extractCep(m.body)) return false; // CEP não cancela
+      if (extractCep(m.body)) return false;
       return true;
     });
     if (hasReply) { log(`📨 Lead respondeu → cancelando ticket ${ticketId}`); activeSequences.delete(ticketId); }
@@ -202,7 +178,7 @@ async function checkReplies() {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', processedTickets: processedTickets.size, activeSequences: activeSequences.size, processedMessages: processedMessages.size });
+  res.json({ status: 'ok', activeSequences: activeSequences.size, processedMessages: processedMessages.size });
 });
 
 app.post('/frete', async (req, res) => {
@@ -217,7 +193,7 @@ app.listen(PORT, () => log(`SK Home Worker rodando na porta ${PORT}`));
 
 async function main() {
   log('🚀 SK Home Lead Recovery iniciado');
-  log(`📡 Polling a cada ${POLL_INTERVAL_MS / 1000}s`);
+  log(`📡 Polling CEP a cada ${POLL_INTERVAL_MS / 1000}s`);
   await poll();
   setInterval(async () => { await checkReplies(); await poll(); }, POLL_INTERVAL_MS);
 }
