@@ -1,4 +1,4 @@
-# SK Home — Webhook de Recuperação de Leads
+# SK Home — Webhook
 
 Dispara automaticamente fotos de beliches para leads que chegam pelo WhatsApp via Whaticket.
 
